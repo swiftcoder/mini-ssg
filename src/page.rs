@@ -8,7 +8,7 @@ use url::Url;
 pub struct PartialPage {
     pub title: String,
     pub description: String,
-    pub date: String,
+    pub date: Option<String>,
     pub permalink: Url,
 }
 
@@ -23,8 +23,9 @@ pub struct Page {
     pub template_name: String,
     pub title: String,
     pub description: String,
-    pub date: String,
+    pub date: Option<String>,
     pub permalink: Url,
     pub content: String,
     pub summary: Option<String>,
+    pub key: String,
 }

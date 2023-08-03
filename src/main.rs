@@ -6,6 +6,7 @@ use std::{
     sync::Arc,
 };
 
+use chrono::Utc;
 use clap::Parser;
 use page::Page;
 use serde::{self, Deserialize, Serialize};
@@ -232,11 +233,7 @@ fn process_templated_files(context: &Context, tera: &Tera) -> anyhow::Result<Sit
                     .to_string_lossy()
                     .to_string(),
             ),
-            date: frontmatter
-                .date
-                .and_then(|d| d.date)
-                .map(|d| d.to_string())
-                .unwrap_or_default(),
+            date: frontmatter.date.and_then(|d| d.date).map(|d| d.to_string()),
             description: frontmatter.description.unwrap_or_default(),
             permalink,
         };
@@ -263,9 +260,10 @@ fn process_templated_files(context: &Context, tera: &Tera) -> anyhow::Result<Sit
             title: partial.title,
             date: partial.date,
             description: partial.description,
-            permalink: partial.permalink,
+            permalink: partial.permalink.clone(),
             content,
             summary,
+            key: partial.permalink.into(),
         };
 
         site.pages.insert(page.name.clone(), page);
@@ -278,19 +276,34 @@ fn process_templated_files(context: &Context, tera: &Tera) -> anyhow::Result<Sit
     Ok(site)
 }
 
-fn render_page(context: &Context, tera: &Tera, page: &Page) -> anyhow::Result<String> {
+fn render_page(
+    context: &Context,
+    tera: &Tera,
+    page: &Page,
+    site: Arc<Site>,
+) -> anyhow::Result<String> {
     let mut ctx = tera::Context::new();
+
+    let mut pages = site
+        .pages
+        .values()
+        .filter(|p| p.date.is_some())
+        .collect::<Vec<_>>();
+    pages.sort_by_key(|p| p.date.clone().unwrap());
+    pages.reverse();
 
     ctx.insert("config", &context.config);
     ctx.insert("page", &page);
+    ctx.insert("pages", &pages);
     ctx.insert("current_url", &page.permalink);
+    ctx.insert("last_updated", &Utc::now().to_string());
 
     Ok(tera.render(&page.template_name, &ctx)?)
 }
 
 fn render_pages_for_site(context: &Context, tera: &Tera, site: Arc<Site>) -> anyhow::Result<()> {
     for page in site.pages.values() {
-        let contents = render_page(context, tera, page)?;
+        let contents = render_page(context, tera, page, site.clone())?;
 
         context.write_to_output(&page.output_path, &contents)?;
     }
