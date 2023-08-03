@@ -8,6 +8,7 @@ edition = "2021"
 [dependencies]
 anyhow = { version = "1.0.72", features = ["backtrace"] }
 clap = { version = "4.3.19", features = ["derive"] }
+combine = "4.6.6"
 pulldown-cmark = "0.9.3"
 serde = { version = "1.0.180", features = ["derive"] }
 tera = "1.19.0"

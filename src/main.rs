@@ -8,7 +8,6 @@ use std::{
 
 use clap::Parser;
 use page::Page;
-use pulldown_cmark::{html, Event, Tag};
 use serde::{self, Deserialize, Serialize};
 use site::Site;
 use tera::Tera;
@@ -16,10 +15,15 @@ use toml::value::Datetime;
 use url::Url;
 use walkdir::WalkDir;
 
-use crate::functions::{get_section::GetSection, get_url::GetURL};
+use crate::{
+    functions::{get_section::GetSection, get_url::GetURL},
+    markdown::render_content,
+    page::PartialPage,
+};
 
 mod frontmatter;
 mod functions;
+mod markdown;
 mod page;
 mod section;
 mod site;
@@ -103,18 +107,15 @@ impl Context {
     }
 }
 
-fn setup_template_engine(context: &Context, site: Arc<Site>) -> anyhow::Result<Tera> {
+fn setup_template_engine(context: &Context) -> anyhow::Result<Tera> {
     let template_dir = context.absolute("templates");
 
-    let mut tera = Tera::new(&template_dir.join("**").join("*").to_string_lossy())?;
+    let tera = Tera::new(&template_dir.join("**").join("*").to_string_lossy())?;
 
     println!(
         "loaded templates: {:?}",
         tera.get_template_names().collect::<Vec<_>>()
     );
-
-    tera.register_function("get_url", GetURL::new(context.config.base_url.clone()));
-    tera.register_function("get_section", GetSection::new(site));
 
     Ok(tera)
 }
@@ -136,8 +137,8 @@ struct Config {
 
 impl Config {
     pub fn make_permalink(&self, path: &str) -> Url {
-        let escaped = path.replace('_', "-");
-        self.base_url.join(&escaped).unwrap()
+        let escaped = path.strip_suffix("index.html").unwrap_or(path);
+        self.base_url.join(escaped).unwrap()
     }
 }
 
@@ -173,23 +174,7 @@ fn copy_static_files(context: &Context) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn render_markdown(input: &str, permalink: &Url) -> String {
-    let parser = pulldown_cmark::Parser::new(input).map(|mut event| {
-        if let Event::Start(Tag::Image(_, dest_url, _)) = &mut event {
-            if Url::from_str(dest_url).is_err() {
-                let result = permalink.join(dest_url).unwrap();
-                *dest_url = result.to_string().into();
-            }
-        };
-        event
-    });
-    let mut contents = String::new();
-    html::push_html(&mut contents, parser);
-
-    contents
-}
-
-fn process_templated_files(context: &Context) -> anyhow::Result<Site> {
+fn process_templated_files(context: &Context, tera: &Tera) -> anyhow::Result<Site> {
     let static_file_extensions = HashSet::from(["png", "webp", "jpg", "jpeg", "gif", "gif"]);
 
     let mut site = Site::new();
@@ -236,29 +221,9 @@ fn process_templated_files(context: &Context) -> anyhow::Result<Site> {
 
         let permalink = context.config.make_permalink(output_path.to_str().unwrap());
 
-        let mut summary = None;
-
-        if let Some(start) = body.find("<!--") {
-            if let Some(end) = body[start + 4..].find("-->") {
-                if body[start + 4..start + 4 + end]
-                    .trim()
-                    .eq_ignore_ascii_case("more")
-                {
-                    summary = Some(render_markdown(&body[0..start], &permalink));
-                }
-            }
-        }
-
-        // println!("permalink: {}", permalink);
-
         let name = output_path.to_str().unwrap().to_string();
 
-        let content = render_markdown(body, &permalink);
-
-        let page = Page {
-            name,
-            output_path,
-            template_name: template_name.to_string(),
+        let partial = PartialPage {
             title: frontmatter.title.unwrap_or(
                 entry
                     .path()
@@ -273,9 +238,34 @@ fn process_templated_files(context: &Context) -> anyhow::Result<Site> {
                 .map(|d| d.to_string())
                 .unwrap_or_default(),
             description: frontmatter.description.unwrap_or_default(),
+            permalink,
+        };
+
+        let mut summary = None;
+
+        if let Some(start) = body.find("<!--") {
+            if let Some(end) = body[start + 4..].find("-->") {
+                if body[start + 4..start + 4 + end]
+                    .trim()
+                    .eq_ignore_ascii_case("more")
+                {
+                    summary = Some(render_content(&body[0..start], &partial, tera)?);
+                }
+            }
+        }
+
+        let content = render_content(body, &partial, tera)?;
+
+        let page = Page {
+            name,
+            output_path,
+            template_name: template_name.to_string(),
+            title: partial.title,
+            date: partial.date,
+            description: partial.description,
+            permalink: partial.permalink,
             content,
             summary,
-            permalink: permalink.into(),
         };
 
         site.pages.insert(page.name.clone(), page);
@@ -322,9 +312,13 @@ fn main() -> anyhow::Result<()> {
 
     copy_static_files(&context)?;
 
-    let site = Arc::new(process_templated_files(&context)?);
+    let mut tera = setup_template_engine(&context)?;
 
-    let tera = setup_template_engine(&context, site.clone())?;
+    tera.register_function("get_url", GetURL::new(context.config.base_url.clone()));
+
+    let site = Arc::new(process_templated_files(&context, &tera)?);
+
+    tera.register_function("get_section", GetSection::new(site.clone()));
 
     render_pages_for_site(&context, &tera, site.clone())?;
 

@@ -2,6 +2,8 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use crate::{section::Section, site::Site};
 
+/// Unlike Zola, you don't have to declare sections. get_section() just recursively
+/// grabs all pages that are children of the requested section.
 pub struct GetSection {
     site: Arc<Site>,
 }
