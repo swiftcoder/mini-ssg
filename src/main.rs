@@ -16,7 +16,7 @@ use url::Url;
 use walkdir::WalkDir;
 
 use crate::{
-    functions::{get_section::GetSection, get_url::GetURL},
+    functions::{get_section::GetSection, get_url::GetURL, markdown::Markdown},
     markdown::render_content,
     page::PartialPage,
 };
@@ -315,6 +315,7 @@ fn main() -> anyhow::Result<()> {
     let mut tera = setup_template_engine(&context)?;
 
     tera.register_function("get_url", GetURL::new(context.config.base_url.clone()));
+    tera.register_filter("markdown", Markdown {});
 
     let site = Arc::new(process_templated_files(&context, &tera)?);
 
