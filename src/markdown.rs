@@ -1,5 +1,5 @@
 use anyhow::anyhow;
-use pulldown_cmark::{html, Event, Tag};
+use pulldown_cmark::{html, CodeBlockKind, CowStr, Event, Tag};
 use std::{ops::Range, str::FromStr};
 use tera::Tera;
 use url::Url;
@@ -14,7 +14,7 @@ use combine::{
     sep_by, EasyParser, Parser, Stream,
 };
 
-use crate::page::PartialPage;
+use crate::{highlighter::Highlighter, page::PartialPage};
 
 #[derive(Clone, Debug)]
 pub struct Argument {
@@ -89,24 +89,54 @@ pub fn render_shortcode(input: &str, page: &PartialPage, tera: &Tera) -> anyhow:
     Err(anyhow!("unknown shortcode '{}'", shortcode.name))
 }
 
-pub fn render_markdown(input: &str, page: &PartialPage) -> anyhow::Result<String> {
-    let parser = pulldown_cmark::Parser::new(input).map(|mut event| {
-        match &mut event {
-            Event::Start(Tag::Image(_, dest_url, _)) => {
+pub fn render_markdown(
+    input: &str,
+    page: &PartialPage,
+    highlighter: &Highlighter,
+) -> anyhow::Result<String> {
+    let mut events = vec![];
+
+    let mut in_code_block = false;
+    let mut lang = String::new();
+    let mut code = String::new();
+
+    for event in pulldown_cmark::Parser::new(input) {
+        match event {
+            Event::Start(Tag::Image(link_type, mut dest_url, title)) => {
                 // transform any relative URLs to absolute
                 // if we don't do this, page summaries rendered on other pages
                 // will contain (broken) relative links
-                if Url::from_str(dest_url).is_err() {
-                    let result = page.permalink.join(dest_url).unwrap();
-                    *dest_url = result.to_string().into();
+                if Url::from_str(&dest_url).is_err() {
+                    let result = page.permalink.join(&dest_url).unwrap();
+                    dest_url = result.to_string().into();
                 }
+                events.push(Event::Start(Tag::Image(link_type, dest_url, title)));
             }
-            _ => {}
+            Event::Start(Tag::CodeBlock(kind)) => {
+                in_code_block = true;
+                lang = if let CodeBlockKind::Fenced(name) = kind {
+                    name.to_string()
+                } else {
+                    "".to_string()
+                };
+            }
+            Event::Text(t) if in_code_block => {
+                code.push_str(&t);
+            }
+            Event::End(Tag::CodeBlock(_)) if in_code_block => {
+                let result = highlighter.highlight(&lang, &code)?;
+
+                events.push(Event::Html(CowStr::from(result)));
+
+                in_code_block = false;
+                code = String::new();
+            }
+            _ => events.push(event),
         }
-        event
-    });
+    }
+
     let mut contents = String::new();
-    html::push_html(&mut contents, parser);
+    html::push_html(&mut contents, events.into_iter());
 
     Ok(contents)
 }
@@ -116,7 +146,12 @@ enum ContentRange {
     ShortCode(Range<usize>),
 }
 
-pub fn render_content(input: &str, page: &PartialPage, tera: &Tera) -> anyhow::Result<String> {
+pub fn render_content(
+    input: &str,
+    page: &PartialPage,
+    tera: &Tera,
+    highlighter: &Highlighter,
+) -> anyhow::Result<String> {
     let mut input = input.to_string();
 
     let mut ranges = vec![];
@@ -145,9 +180,10 @@ pub fn render_content(input: &str, page: &PartialPage, tera: &Tera) -> anyhow::R
 
     for range in ranges {
         match range {
-            ContentRange::Markdown(r) => {
-                input.replace_range(r.clone(), &render_markdown(&input[r.clone()], page)?)
-            }
+            ContentRange::Markdown(r) => input.replace_range(
+                r.clone(),
+                &render_markdown(&input[r.clone()], page, highlighter)?,
+            ),
             ContentRange::ShortCode(r) => {
                 input.replace_range(r.clone(), &render_shortcode(&input[r.clone()], page, tera)?)
             }

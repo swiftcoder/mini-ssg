@@ -18,12 +18,14 @@ use walkdir::WalkDir;
 
 use crate::{
     functions::{get_section::GetSection, get_url::GetURL, markdown::Markdown},
+    highlighter::Highlighter,
     markdown::render_content,
     page::PartialPage,
 };
 
 mod frontmatter;
 mod functions;
+mod highlighter;
 mod markdown;
 mod page;
 mod section;
@@ -41,7 +43,7 @@ struct Args {
     local: bool,
 }
 
-struct Context {
+pub struct Context {
     home: PathBuf,
     output_dir: PathBuf,
     config: Config,
@@ -175,7 +177,11 @@ fn copy_static_files(context: &Context) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn process_templated_files(context: &Context, tera: &Tera) -> anyhow::Result<Site> {
+fn process_templated_files(
+    context: &Context,
+    tera: &Tera,
+    highlighter: &Highlighter,
+) -> anyhow::Result<Site> {
     let static_file_extensions = HashSet::from(["png", "webp", "jpg", "jpeg", "gif", "gif"]);
 
     let mut site = Site::new();
@@ -246,12 +252,17 @@ fn process_templated_files(context: &Context, tera: &Tera) -> anyhow::Result<Sit
                     .trim()
                     .eq_ignore_ascii_case("more")
                 {
-                    summary = Some(render_content(&body[0..start], &partial, tera)?);
+                    summary = Some(render_content(
+                        &body[0..start],
+                        &partial,
+                        tera,
+                        highlighter,
+                    )?);
                 }
             }
         }
 
-        let content = render_content(body, &partial, tera)?;
+        let content = render_content(body, &partial, tera, highlighter)?;
 
         let page = Page {
             name,
@@ -325,12 +336,14 @@ fn main() -> anyhow::Result<()> {
 
     copy_static_files(&context)?;
 
+    let highlighter = Highlighter::new(&context)?;
+
     let mut tera = setup_template_engine(&context)?;
 
     tera.register_function("get_url", GetURL::new(context.config.base_url.clone()));
     tera.register_filter("markdown", Markdown {});
 
-    let site = Arc::new(process_templated_files(&context, &tera)?);
+    let site = Arc::new(process_templated_files(&context, &tera, &highlighter)?);
 
     tera.register_function("get_section", GetSection::new(site.clone()));
 
