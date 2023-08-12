@@ -1,15 +1,19 @@
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::{Arc, RwLock},
+};
 
 use crate::{section::Section, site::Site};
 
 /// Unlike Zola, you don't have to declare sections. get_section() just recursively
 /// grabs all pages that are children of the requested section.
 pub struct GetSection {
-    site: Arc<Site>,
+    site: Arc<RwLock<Site>>,
 }
 
 impl GetSection {
-    pub fn new(site: Arc<Site>) -> Self {
+    pub fn new(site: Arc<RwLock<Site>>) -> Self {
         Self { site }
     }
 }
@@ -29,7 +33,9 @@ impl tera::Function for GetSection {
 
         let mut section = Section { pages: vec![] };
 
-        for page in self.site.pages.values() {
+        let site = self.site.try_read().map_err(|e| e.to_string())?;
+
+        for page in site.pages.values() {
             if page.name.starts_with(&prefix) {
                 section.pages.push(page.clone())
             }

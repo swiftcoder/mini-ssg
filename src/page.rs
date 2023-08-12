@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{collections::HashMap, path::PathBuf};
 
 use serde::Serialize;
 use url::Url;
@@ -21,11 +21,14 @@ pub struct Page {
     pub output_path: PathBuf,
     #[serde(skip)]
     pub template_name: String,
+    #[serde(skip)]
+    pub taxonomy: Option<(String, String)>,
     pub title: String,
     pub description: String,
     pub date: Option<String>,
     pub permalink: Url,
     pub content: String,
     pub summary: Option<String>,
-    pub key: String,
+    // pub key: String,
+    pub taxonomies: HashMap<String, Vec<String>>,
 }

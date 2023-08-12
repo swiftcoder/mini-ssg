@@ -1,9 +1,9 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs::{self, create_dir_all, remove_dir_all},
     path::{Path, PathBuf},
     str::FromStr,
-    sync::Arc,
+    sync::{Arc, RwLock},
 };
 
 use chrono::Utc;
@@ -17,7 +17,10 @@ use url::Url;
 use walkdir::WalkDir;
 
 use crate::{
-    functions::{get_section::GetSection, get_url::GetURL, markdown::Markdown},
+    functions::{
+        get_section::GetSection, get_taxonomy_url::GetTaxonomyURL, get_url::GetURL,
+        markdown::Markdown,
+    },
     highlighter::Highlighter,
     markdown::render_content,
     page::PartialPage,
@@ -55,6 +58,8 @@ impl Context {
         let config_text = fs::read_to_string(config_file)?;
         let mut config: Config = toml::from_str(&config_text)?;
 
+        println!("config: {:?}", config);
+
         if local {
             config.base_url = Url::from_str("http://127.0.0.1:1111")?;
         }
@@ -67,8 +72,10 @@ impl Context {
     }
 
     fn clean_output_dir(&self) -> anyhow::Result<()> {
-        remove_dir_all(&self.output_dir)?;
-        create_dir_all(&self.output_dir)?;
+        if self.output_dir.exists() {
+            remove_dir_all(&self.output_dir)?;
+            create_dir_all(&self.output_dir)?;
+        }
         Ok(())
     }
 
@@ -110,6 +117,34 @@ impl Context {
     }
 }
 
+#[derive(Deserialize, Debug)]
+struct FrontMatter {
+    title: Option<String>,
+    date: Option<Datetime>,
+    template: Option<String>,
+    description: Option<String>,
+    taxonomies: Option<HashMap<String, Vec<String>>>,
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone)]
+pub struct Taxonomy {
+    name: String,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+pub struct Config {
+    title: String,
+    base_url: Url,
+    taxonomies: Vec<Taxonomy>,
+}
+
+impl Config {
+    pub fn make_permalink(&self, path: &str) -> Url {
+        let escaped = path.strip_suffix("index.html").unwrap_or(path);
+        self.base_url.join(escaped).unwrap()
+    }
+}
+
 fn setup_template_engine(context: &Context) -> anyhow::Result<Tera> {
     let template_dir = context.absolute("templates");
 
@@ -123,29 +158,7 @@ fn setup_template_engine(context: &Context) -> anyhow::Result<Tera> {
     Ok(tera)
 }
 
-#[derive(Deserialize)]
-struct FrontMatter {
-    title: Option<String>,
-    date: Option<Datetime>,
-    template: Option<String>,
-    description: Option<String>,
-    transparent: Option<bool>,
-}
-
-#[derive(Deserialize, Serialize)]
-struct Config {
-    title: String,
-    base_url: Url,
-}
-
-impl Config {
-    pub fn make_permalink(&self, path: &str) -> Url {
-        let escaped = path.strip_suffix("index.html").unwrap_or(path);
-        self.base_url.join(escaped).unwrap()
-    }
-}
-
-fn output_path(relative_path: &Path, template_name: Option<&str>) -> PathBuf {
+fn output_path(relative_path: &Path, template_name: Option<&str>) -> String {
     let mut output_path = relative_path.with_extension("");
     if let Some(extension) = Path::new(template_name.unwrap_or("")).extension() {
         if extension.eq("html") {
@@ -158,7 +171,7 @@ fn output_path(relative_path: &Path, template_name: Option<&str>) -> PathBuf {
         }
     }
 
-    output_path
+    slugify(output_path.to_str().unwrap())
 }
 
 fn copy_static_files(context: &Context) -> anyhow::Result<()> {
@@ -226,9 +239,10 @@ fn process_templated_files(
             Some(template_name),
         );
 
-        let permalink = context.config.make_permalink(output_path.to_str().unwrap());
+        let permalink = context.config.make_permalink(&output_path);
 
-        let name = output_path.to_str().unwrap().to_string();
+        let name = output_path.to_string();
+        let taxonomies = frontmatter.taxonomies.unwrap_or_default();
 
         let partial = PartialPage {
             title: frontmatter.title.unwrap_or(
@@ -266,22 +280,20 @@ fn process_templated_files(
 
         let page = Page {
             name,
-            output_path,
+            output_path: Path::new(&output_path).to_path_buf(),
             template_name: template_name.to_string(),
             title: partial.title,
+            taxonomy: None,
             date: partial.date,
             description: partial.description,
             permalink: partial.permalink.clone(),
             content,
             summary,
-            key: partial.permalink.into(),
+            // key: partial.permalink.into(),
+            taxonomies,
         };
 
         site.pages.insert(page.name.clone(), page);
-
-        // let contents = render_page(context, tera, &page)?;
-
-        // context.write_to_output(&output_path, &contents)?;
     }
 
     Ok(site)
@@ -291,17 +303,9 @@ fn render_page(
     context: &Context,
     tera: &Tera,
     page: &Page,
-    site: Arc<Site>,
+    pages: &Vec<Page>,
 ) -> anyhow::Result<String> {
     let mut ctx = tera::Context::new();
-
-    let mut pages = site
-        .pages
-        .values()
-        .filter(|p| p.date.is_some())
-        .collect::<Vec<_>>();
-    pages.sort_by_key(|p| p.date.clone().unwrap());
-    pages.reverse();
 
     ctx.insert("config", &context.config);
     ctx.insert("page", &page);
@@ -312,14 +316,93 @@ fn render_page(
     Ok(tera.render(&page.template_name, &ctx)?)
 }
 
-fn render_pages_for_site(context: &Context, tera: &Tera, site: Arc<Site>) -> anyhow::Result<()> {
+fn render_pages_for_site(
+    context: &Context,
+    tera: &Tera,
+    site: Arc<RwLock<Site>>,
+) -> anyhow::Result<()> {
+    let site = site.try_read().unwrap();
+
+    let mut pages = site
+        .pages
+        .values()
+        .filter(|p| p.date.is_some())
+        .cloned()
+        .collect::<Vec<_>>();
+    pages.sort_by_key(|p| p.date.clone().unwrap());
+    pages.reverse();
+
     for page in site.pages.values() {
-        let contents = render_page(context, tera, page, site.clone())?;
+        let contents = if let Some((taxonomy, term)) = &page.taxonomy {
+            let term_pages = pages
+                .iter()
+                .filter(|p| {
+                    p.taxonomies.contains_key(taxonomy)
+                        && p.taxonomies.get(taxonomy).unwrap().contains(term)
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+
+            render_page(context, tera, page, &term_pages)?
+        } else {
+            render_page(context, tera, page, &pages)?
+        };
 
         context.write_to_output(&page.output_path, &contents)?;
     }
 
     Ok(())
+}
+
+fn process_taxonomies(
+    context: &Context,
+    _tera: &Tera,
+    site: &mut Arc<RwLock<Site>>,
+) -> anyhow::Result<()> {
+    for taxonomy in &context.config.taxonomies {
+        let terms = {
+            let site = site.try_read().unwrap();
+            site.pages
+                .values()
+                .flat_map(|p| p.taxonomies.get(&taxonomy.name))
+                .flatten()
+                .cloned()
+                .collect::<HashSet<_>>()
+        };
+
+        for term in terms {
+            let template_name = format!("{}/single.html", &taxonomy.name);
+
+            let output_path =
+                output_path(&Path::new(&taxonomy.name).join(&term), Some(&template_name));
+            let name = output_path.to_string();
+            let permalink = context.config.make_permalink(&name);
+
+            let page = Page {
+                name: name.to_string(),
+                output_path: Path::new(&output_path).to_path_buf(),
+                template_name,
+                title: term.to_string(),
+                taxonomy: Some((taxonomy.name.to_string(), term.to_string())),
+                description: String::new(),
+                date: None,
+                permalink,
+                content: String::new(),
+                summary: None,
+                // key: String::new(),
+                taxonomies: HashMap::new(),
+            };
+
+            let mut site = site.try_write().unwrap();
+            site.pages.insert(name, page);
+        }
+    }
+
+    Ok(())
+}
+
+pub fn slugify(input: &str) -> String {
+    input.replace(' ', "-")
 }
 
 fn main() -> anyhow::Result<()> {
@@ -341,11 +424,21 @@ fn main() -> anyhow::Result<()> {
     let mut tera = setup_template_engine(&context)?;
 
     tera.register_function("get_url", GetURL::new(context.config.base_url.clone()));
+    tera.register_function(
+        "get_taxonomy_url",
+        GetTaxonomyURL::new(context.config.base_url.clone(), &context.config.taxonomies),
+    );
     tera.register_filter("markdown", Markdown {});
 
-    let site = Arc::new(process_templated_files(&context, &tera, &highlighter)?);
+    let mut site = Arc::new(RwLock::new(process_templated_files(
+        &context,
+        &tera,
+        &highlighter,
+    )?));
 
     tera.register_function("get_section", GetSection::new(site.clone()));
+
+    process_taxonomies(&context, &tera, &mut site)?;
 
     render_pages_for_site(&context, &tera, site.clone())?;
 

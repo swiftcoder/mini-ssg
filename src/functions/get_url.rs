@@ -24,4 +24,8 @@ impl tera::Function for GetURL {
 
         Ok(tera::to_value::<String>(result.into())?)
     }
+
+    fn is_safe(&self) -> bool {
+        true
+    }
 }
