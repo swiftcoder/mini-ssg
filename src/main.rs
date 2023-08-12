@@ -44,6 +44,22 @@ struct Args {
     output_dir: String,
     #[arg(short, long)]
     local: bool,
+    #[arg(long)]
+    base_url: Option<Url>,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+pub struct Config {
+    title: String,
+    base_url: Url,
+    taxonomies: Vec<Taxonomy>,
+}
+
+impl Config {
+    pub fn make_permalink(&self, path: &str) -> Url {
+        let escaped = path.strip_suffix("index.html").unwrap_or(path);
+        self.base_url.join(escaped).unwrap()
+    }
 }
 
 pub struct Context {
@@ -53,12 +69,21 @@ pub struct Context {
 }
 
 impl Context {
-    pub fn new(home: PathBuf, output_dir: PathBuf, local: bool) -> anyhow::Result<Self> {
+    pub fn new(
+        home: PathBuf,
+        output_dir: PathBuf,
+        local: bool,
+        base_url: &Option<Url>,
+    ) -> anyhow::Result<Self> {
         let config_file = home.join("config.toml");
         let config_text = fs::read_to_string(config_file)?;
         let mut config: Config = toml::from_str(&config_text)?;
 
         println!("config: {:?}", config);
+
+        if let Some(url) = base_url {
+            config.base_url = url.clone();
+        }
 
         if local {
             config.base_url = Url::from_str("http://127.0.0.1:1111")?;
@@ -129,20 +154,6 @@ struct FrontMatter {
 #[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct Taxonomy {
     name: String,
-}
-
-#[derive(Deserialize, Serialize, Debug)]
-pub struct Config {
-    title: String,
-    base_url: Url,
-    taxonomies: Vec<Taxonomy>,
-}
-
-impl Config {
-    pub fn make_permalink(&self, path: &str) -> Url {
-        let escaped = path.strip_suffix("index.html").unwrap_or(path);
-        self.base_url.join(escaped).unwrap()
-    }
 }
 
 fn setup_template_engine(context: &Context) -> anyhow::Result<Tera> {
@@ -413,7 +424,7 @@ fn main() -> anyhow::Result<()> {
     let home = PathBuf::from_str(&args.path)?;
     let output_dir = home.join(&args.output_dir);
 
-    let context = Context::new(home, output_dir, args.local)?;
+    let context = Context::new(home, output_dir, args.local, &args.base_url)?;
 
     context.clean_output_dir()?;
 
